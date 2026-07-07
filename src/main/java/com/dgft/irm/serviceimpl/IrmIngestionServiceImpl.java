@@ -217,9 +217,13 @@ public class IrmIngestionServiceImpl implements IrmIngestionService {
             try {
                 LocalDateTime now = LocalDateTime.now();
 
+                // Create a new IRM Master entity to store the validated CSV record.
                 IrmMaster entity = new IrmMaster();
 
+                // Generate a unique ID for the IRM record.
                 entity.setId(IdGenerator.next());
+
+                // Map validated CSV fields to the IRM Master entity.
                 entity.setIrmNumber(record.getIrmRefNumber());
                 entity.setRemittanceAmount(new BigDecimal(record.getRemittanceAmount().trim()));
                 entity.setRemittanceDate(LocalDate.parse(record.getRemittanceDate().trim(), formatter));
@@ -231,6 +235,7 @@ public class IrmIngestionServiceImpl implements IrmIngestionService {
                 entity.setPurposeOfRemittance(record.getPurposeOfRemittance());
                 entity.setIfscCode(record.getIfscCode());
 
+                // INR Credit Amount is optional, so populate only when available.
                 if (record.getInrCreditAmount() != null && !record.getInrCreditAmount().isBlank()) {
                     entity.setInrCreditAmount(new BigDecimal(record.getInrCreditAmount().trim()));
                 }
@@ -239,20 +244,27 @@ public class IrmIngestionServiceImpl implements IrmIngestionService {
                 entity.setBankReferenceNumber(record.getBankRefNumber());
                 entity.setBankAccountNumber(record.getBankAccNum());
 
+                // IRM Issue Date is optional, so parse only if provided.
                 if (record.getRemittanceIssueDate() != null && !record.getRemittanceIssueDate().isBlank()) {
                     entity.setIrmIssueDate(LocalDate.parse(record.getRemittanceIssueDate().trim(), formatter));
                 }
 
+                // Initialize default workflow and DGFT statuses for a newly uploaded IRM.
                 entity.setFlag(AppConstants.FLAG_NEW_WITH_WORKFLOW);
                 entity.setStatus(AppConstants.STATUS_ACTIVE);
                 entity.setDgftFlag(AppConstants.DGFT_FLAG_FRESH);
                 entity.setDgftStatus(AppConstants.DGFT_STATUS_AWAITING_REQUEST_INITIATED);
+
+                // Store audit information for traceability.
                 entity.setInboundFileName(fileName);
                 entity.setAddedBy(systemUser);
                 entity.setAddedDate(now);
 
+                // Save the validated IRM record as the current (live) record.
                 irmMasterRepository.save(entity);
 
+                // Save a snapshot of the newly created IRM into the history table.
+                // This preserves the initial state for audit and future tracking.
                 irmMasterHisRepository.save(
                         IrmMasterHisMapper.fromMaster(
                                 entity,
@@ -260,6 +272,7 @@ public class IrmIngestionServiceImpl implements IrmIngestionService {
                                 IdGenerator.next(),
                                 now));
 
+                // Record successful processing for ACK file generation.
                 results.add(new RecordResultDto(
                         record.getRowNumber(),
                         record.getIrmRefNumber(),

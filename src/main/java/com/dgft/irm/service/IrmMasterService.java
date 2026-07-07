@@ -1,4 +1,4 @@
-package com.dgft.irm.serviceimpl;
+package com.dgft.irm.service;
 
 import java.util.List;
 

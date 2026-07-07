@@ -5,6 +5,8 @@ import lombok.Data;
 
 import java.util.List;
 
+//  Response DTO containing the summary of a CSV ingestion process.
+//   Includes processing statistics, ACK file location, and record-wise results.
 @Data
 @AllArgsConstructor
 public class IngestionSummaryResponseDto {

@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.*;
 
 import com.dgft.irm.dto.response.ApiResponseDto;
 import com.dgft.irm.dto.response.IrmMasterResponseDto;
-import com.dgft.irm.serviceimpl.IrmMasterService;
+import com.dgft.irm.service.IrmMasterService;
 
 import java.util.List;
 

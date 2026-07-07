@@ -6,6 +6,10 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
+
+//  Response DTO containing IRM Master details returned to the client.
+//  Represents the processed IRM record retrieved from the database.
+ 
 @Data
 public class IrmMasterResponseDto {
     private String id;

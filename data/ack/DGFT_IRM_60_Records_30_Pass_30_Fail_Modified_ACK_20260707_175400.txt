@@ -1,0 +1,23 @@
+IRM_NUMBER|ROW_NUMBER|STATUS|REASON
+IRMFAIL00041|2|FAIL|Remittance Date must be dd/MM/yyyy
+IRMFAIL00042|3|FAIL|Remittance Date must be dd/MM/yyyy
+IRMFAIL00043|4|FAIL|Remittance Date must be dd/MM/yyyy
+IRMFAIL00044|5|FAIL|Remittance Date must be dd/MM/yyyy
+IRMFAIL00045|6|FAIL|Remittance Date must be dd/MM/yyyy
+IRMFAIL00046|7|FAIL|IFSC Code must be exactly 11 alphanumeric characters
+IRMFAIL00047|8|FAIL|IFSC Code must be exactly 11 alphanumeric characters
+IRMFAIL00048|9|FAIL|IFSC Code must be exactly 11 alphanumeric characters
+IRMFAIL00049|10|FAIL|IFSC Code must be exactly 11 alphanumeric characters
+IRMFAIL00050|11|FAIL|IFSC Code must be exactly 11 alphanumeric characters
+IRMFAIL00051|12|FAIL|PAN Number must be exactly 10 alphanumeric characters
+IRMFAIL00052|13|FAIL|PAN Number must be exactly 10 alphanumeric characters
+IRMFAIL00053|14|FAIL|PAN Number must be exactly 10 alphanumeric characters
+IRMFAIL00054|15|FAIL|PAN Number must be exactly 10 alphanumeric characters
+IRMFAIL00055|16|FAIL|PAN Number must be exactly 10 alphanumeric characters
+IRMFAIL00056|17|FAIL|Purpose of Remittance does not exist or is inactive in DGFT_PURPOSE_CODE_MASTER
+IRMFAIL00057|18|FAIL|Purpose of Remittance does not exist or is inactive in DGFT_PURPOSE_CODE_MASTER
+IRMFAIL00058|19|FAIL|Purpose of Remittance does not exist or is inactive in DGFT_PURPOSE_CODE_MASTER
+IRMFAIL00059|20|FAIL|Purpose of Remittance does not exist or is inactive in DGFT_PURPOSE_CODE_MASTER
+IRMFAIL00060|21|FAIL|Purpose of Remittance does not exist or is inactive in DGFT_PURPOSE_CODE_MASTER
+---
+TOTAL=20 PASS=0 FAIL=20

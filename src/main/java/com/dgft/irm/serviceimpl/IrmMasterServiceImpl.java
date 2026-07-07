@@ -4,6 +4,7 @@ import com.dgft.irm.dto.response.IrmMasterResponseDto;
 import com.dgft.irm.exception.ResourceNotFoundException;
 import com.dgft.irm.mapper.IrmMasterMapper;
 import com.dgft.irm.repository.IrmMasterRepository;
+import com.dgft.irm.service.IrmMasterService;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;

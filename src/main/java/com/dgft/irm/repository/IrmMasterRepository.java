@@ -11,4 +11,9 @@ public interface IrmMasterRepository extends JpaRepository<IrmMaster, String> {
     boolean existsByIrmNumber(String irmNumber);
     Optional<IrmMaster> findByIrmNumber(String irmNumber);
     List<IrmMaster> findByStatus(String status);
+
+    List<IrmMaster> findTop20ByDgftFlagAndDgftStatusOrderByAddedDateAsc(
+        String dgftFlag,
+        String dgftStatus
+);
 }

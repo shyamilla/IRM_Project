@@ -3,6 +3,22 @@ package com.dgft.irm.dto.request;
 import jakarta.validation.constraints.*;
 import lombok.Data;
 
+/**
+
+
+ * CSV File
+ *      ↓
+ * IrmCsvRequestDto
+ *      ↓
+ * Bean Validation
+ *      ↓
+ * Business Validation
+ *      ↓
+ * Entity Mapping
+ *      ↓
+ * IRM_MASTER Database Table
+ */
+
 @Data
 public class IrmCsvRequestDto {
 
