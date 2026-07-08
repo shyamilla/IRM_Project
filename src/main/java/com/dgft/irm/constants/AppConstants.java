@@ -40,6 +40,10 @@ public final class AppConstants {
 
     public static final String ACK_STATUS_PASS = "PASS";
     public static final String ACK_STATUS_FAIL = "FAIL";
+
+
+    // dgft_irm_master_his trigger status value used by Step 4 (Enquiry scheduler)
+    public static final String TRIGGER_STATUS_ENQUIRY_VALIDATED = "ENQUIRY_VALIDATED";
 }
 
 
