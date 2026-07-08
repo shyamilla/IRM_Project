@@ -132,4 +132,83 @@ public class DgftIrmEnquiryServiceImpl implements DgftIrmEnquiryService {
         log.info("DGFT enquiry confirmed for uniqueTxId {}. {} dgft_irm_master row(s) updated.",
                 master.getUniqueTxId(), pendingIrmMasters.size());
     }
+
+     @Override
+    @Transactional
+    public void finalizeIrmMasterStatus() {
+ 
+        List<IrmMessageMaster> terminalMasters = irmMessageMasterRepository.findByStatusIn(
+                List.of(AppConstants.MSG_PUSH_FULLY_PROCESSED, AppConstants.MSG_PUSH_PROCESS_FAILED));
+ 
+        if (terminalMasters.isEmpty()) {
+            log.info("No IRM batches with a terminal Step 5 outcome found for final status sync.");
+            return;
+        }
+ 
+        log.info("Found {} IRM batch(es) with a terminal outcome eligible for final status sync.",
+                terminalMasters.size());
+ 
+        for (IrmMessageMaster master : terminalMasters) {
+            try {
+                finalizeSingleBatch(master);
+            } catch (Exception ex) {
+                log.error("Final status sync failed for message master id {}", master.getId(), ex);
+            }
+        }
+    }
+ 
+    private void finalizeSingleBatch(IrmMessageMaster master) {
+ 
+        List<IrmMessageDetail> details =
+                irmMessageDetailRepository.findByDgftIrmMsgMasterId(master.getId());
+ 
+        if (details.isEmpty()) {
+            log.warn("Message master id {} has no detail rows - skipping final status sync.", master.getId());
+            return;
+        }
+ 
+        LocalDateTime now = LocalDateTime.now();
+        int syncedCount = 0;
+ 
+        for (IrmMessageDetail detail : details) {
+ 
+            var irmMasterOpt = irmMasterRepository.findByIrmNumber(detail.getIrmNumber());
+ 
+            if (irmMasterOpt.isEmpty()) {
+                log.warn("No dgft_irm_master row found for IRM number {} - skipping.", detail.getIrmNumber());
+                continue;
+            }
+ 
+            IrmMaster irmMaster = irmMasterOpt.get();
+ 
+            // Already synced by a previous run - guards against re-processing every tick.
+            if (master.getStatus().equals(irmMaster.getMasterDetailStatus())) {
+                continue;
+            }
+ 
+            boolean detailPassed = AppConstants.MSG_DETAIL_STATUS_PROCESSED.equals(detail.getStatus());
+ 
+            irmMaster.setFlag(detailPassed
+                    ? AppConstants.FLAG_PROCESSED_ACTIVE
+                    : AppConstants.FLAG_PROCESSED_FAILED);
+            irmMaster.setStatus(AppConstants.STATUS_ACTIVE);
+            irmMaster.setDgftFlag(AppConstants.DGFT_FLAG_FRESH);
+            irmMaster.setDgftStatus(detailPassed
+                    ? AppConstants.DGFT_STATUS_PROCESSED
+                    : AppConstants.DGFT_STATUS_FAILED);
+            irmMaster.setMasterDetailStatus(master.getStatus());
+            irmMaster.setModifiedBy(systemUser);
+            irmMaster.setModifiedDate(now);
+ 
+            irmMasterRepository.save(irmMaster);
+ 
+            irmMasterHisRepository.save(IrmMasterHisMapper.fromMaster(
+                    irmMaster, AppConstants.TRIGGER_STATUS_FINAL_STATUS_SYNCED, IdGenerator.next(), now));
+ 
+            syncedCount++;
+        }
+ 
+        log.info("Final status sync complete for uniqueTxId {}. {} dgft_irm_master row(s) updated to {}.",
+                master.getUniqueTxId(), syncedCount, master.getStatus());
+    }
 }

@@ -1,0 +1,380 @@
+=====================================================================
+STEP 4: DGFT IRM ENQUIRY SERVICE SCHEDULER - COMPLETE (FROM SCRATCH)
+=====================================================================
+Spec given:
+  Step        : Execute Enquiry scheduler for reviewing the status of
+                IRM pushed into staging table
+  Service     : DGFT IRM Enquiry Service Scheduler
+  Purpose     : View the status of IRM details pushed to the staging
+                table for DGFT reporting, and reflect progress in
+                reporting IRM details to DGFT end in TRRACS.
+  Expected result (dgft_irm_master only):
+                FLAG                 : P
+                STATUS               : ACTIVE
+                DGFT_FLAG            : F
+                DGFT_STATUS          : Validated
+                MASTER_DETAIL_STATUS : MSG_PUSH_SUCCESS
+  Table(s)    : DGFT_IRM_MASTER
+
+---------------------------------------------------------------------
+DESIGN DECISIONS (this is a fresh build - please confirm/correct)
+---------------------------------------------------------------------
+1. ELIGIBILITY: the scheduler looks at dgft_irm_message_master rows
+   with STATUS = AppConstants.MSG_PUSH_SUCCESS (i.e. batches Step 3
+   already pushed successfully). For each such batch, it walks the
+   linked dgft_irm_message_detail rows to find the corresponding
+   dgft_irm_master row (by IRM_NUMBER).
+
+2. IDEMPOTENCY GUARD: Step 4's own table list only includes
+   DGFT_IRM_MASTER - the staging tables (message master/detail) are
+   NOT updated by this step. Since dgft_irm_message_master.STATUS
+   stays at MSG_PUSH_SUCCESS forever, something has to stop the same
+   batch being "enquired" again on every scheduler tick. I used
+   dgft_irm_master.MASTER_DETAIL_STATUS != MSG_PUSH_SUCCESS as the
+   "not yet confirmed" guard - once it's set, that IRM row is skipped
+   on future runs.
+
+3. CALL GRANULARITY: one enquiry API call per message-master batch
+   (keyed by UNIQUE_TX_ID), applied to every IRM row in that batch
+   that's still pending confirmation - not one call per IRM number.
+
+4. FAILURE PATH: not specified in the given spec (only the success
+   result is documented). Current behavior: log the failure and
+   leave the dgft_irm_master row(s) untouched so the next scheduler
+   run retries them automatically. No new status is written on
+   failure. Tell me if you'd rather mark something explicitly
+   (e.g. DGFT_STATUS = Failed) instead.
+
+5. NEW AppConstants entries needed (append-only, nothing existing
+   changes): TRIGGER_STATUS_ENQUIRY_VALIDATED, for the audit trail
+   entry in dgft_irm_master_his (mirrors how Step 2 already uses
+   TRIGGER_STATUS_PUSHED_TO_STAGING via IrmMasterHisMapper).
+
+6. Reused as-is (no changes needed): IrmMasterHisMapper.fromMaster(),
+   IrmMasterRepository.findByIrmNumber(), IrmMessageMasterRepository
+   .findByStatus(), IrmMessageDetailRepository
+   .findByDgftIrmMsgMasterId(), IdGenerator.next().
+
+---------------------------------------------------------------------
+FILES TO ADD / CHANGE
+---------------------------------------------------------------------
+NEW:
+  1. src/main/java/com/dgft/irm/scheduler/DgftEnquiryApiClient.java
+  2. src/main/java/com/dgft/irm/scheduler/MockDgftEnquiryApiClient.java
+  3. src/main/java/com/dgft/irm/service/DgftIrmEnquiryService.java
+  4. src/main/java/com/dgft/irm/serviceimpl/DgftIrmEnquiryServiceImpl.java
+  5. src/main/java/com/dgft/irm/scheduler/DgftIrmEnquiryScheduler.java
+
+CHANGED:
+  6. src/main/java/com/dgft/irm/constants/AppConstants.java (append 2 lines)
+  7. src/main/resources/application.properties (append 2 lines)
+
+=====================================================================
+1. DgftEnquiryApiClient.java  (NEW)
+=====================================================================
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.dto.response.ApiResponseDto;
+
+/**
+ * DGFT Enquiry API contract used by Step 4. Given the unique
+ * transaction id of a previously pushed batch, returns the current
+ * status of that batch at the DGFT end.
+ */
+public interface DgftEnquiryApiClient {
+
+    ApiResponseDto<String> enquireStatus(String uniqueTxId);
+}
+
+
+=====================================================================
+2. MockDgftEnquiryApiClient.java  (NEW)
+=====================================================================
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.dto.response.ApiResponseDto;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
+
+/**
+ * Mock implementation of the DGFT Enquiry API contract, active only
+ * under the "mock" profile (application.properties already sets
+ * spring.profiles.active=mock). Always returns a validated status
+ * with no real network call, so the Step 4 flow can be exercised
+ * end-to-end in dev/test.
+ *
+ * A real implementation can later be added under a different
+ * @Profile, implementing the same DgftEnquiryApiClient interface,
+ * with no changes needed to DgftIrmEnquiryServiceImpl.
+ */
+@Slf4j
+@Component
+@Profile("mock")
+public class MockDgftEnquiryApiClient implements DgftEnquiryApiClient {
+
+    @Override
+    public ApiResponseDto<String> enquireStatus(String uniqueTxId) {
+
+        log.info("[MOCK DGFT] Simulating enquiry for uniqueTxId: {}", uniqueTxId);
+
+        return ApiResponseDto.ok("IRM batch validated by DGFT (mock enquiry)", uniqueTxId);
+    }
+}
+
+
+=====================================================================
+3. DgftIrmEnquiryService.java  (NEW)
+=====================================================================
+package com.dgft.irm.service;
+
+public interface DgftIrmEnquiryService {
+
+    /**
+     * Reviews the DGFT status of IRM batches already pushed to the
+     * staging table (Step 3) and reflects confirmed progress onto
+     * dgft_irm_master (TRRACS source-of-truth row).
+     */
+    void enquireIrmStatus();
+}
+
+
+=====================================================================
+4. DgftIrmEnquiryServiceImpl.java  (NEW)
+=====================================================================
+package com.dgft.irm.serviceimpl;
+
+import com.dgft.irm.constants.AppConstants;
+import com.dgft.irm.dto.response.ApiResponseDto;
+import com.dgft.irm.entity.IrmMaster;
+import com.dgft.irm.entity.IrmMessageDetail;
+import com.dgft.irm.entity.IrmMessageMaster;
+import com.dgft.irm.mapper.IrmMasterHisMapper;
+import com.dgft.irm.repository.IrmMasterHisRepository;
+import com.dgft.irm.repository.IrmMasterRepository;
+import com.dgft.irm.repository.IrmMessageDetailRepository;
+import com.dgft.irm.repository.IrmMessageMasterRepository;
+import com.dgft.irm.scheduler.DgftEnquiryApiClient;
+import com.dgft.irm.service.DgftIrmEnquiryService;
+import com.dgft.irm.util.IdGenerator;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Step 4 of the DGFT new-records flow: "DGFT IRM Enquiry Service Scheduler".
+ * Reviews the status of IRM batches that Step 3 pushed successfully
+ * (dgft_irm_message_master.STATUS = MSG_PUSH_SUCCESS) and, once DGFT
+ * confirms the batch via enquiry, updates the source-of-truth
+ * dgft_irm_master row(s):
+ *
+ *   FLAG                 = P
+ *   STATUS               = ACTIVE
+ *   DGFT_FLAG             = F
+ *   DGFT_STATUS           = Validated
+ *   MASTER_DETAIL_STATUS = MSG_PUSH_SUCCESS
+ *
+ * Also writes a dgft_irm_master_his audit snapshot for each row updated,
+ * mirroring the pattern Step 2 already uses.
+ *
+ * IRM rows whose MASTER_DETAIL_STATUS is already MSG_PUSH_SUCCESS are
+ * treated as already confirmed and are skipped on subsequent runs.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DgftIrmEnquiryServiceImpl implements DgftIrmEnquiryService {
+
+    private final IrmMessageMasterRepository irmMessageMasterRepository;
+    private final IrmMessageDetailRepository irmMessageDetailRepository;
+    private final IrmMasterRepository irmMasterRepository;
+    private final IrmMasterHisRepository irmMasterHisRepository;
+    private final DgftEnquiryApiClient dgftEnquiryApiClient;
+
+    @Value("${dgft.audit.system-user}")
+    private String systemUser;
+
+    @Override
+    @Transactional
+    public void enquireIrmStatus() {
+
+        List<IrmMessageMaster> pushedMasters =
+                irmMessageMasterRepository.findByStatus(AppConstants.MSG_PUSH_SUCCESS);
+
+        if (pushedMasters.isEmpty()) {
+            log.info("No pushed IRM batches found for DGFT enquiry.");
+            return;
+        }
+
+        log.info("Found {} pushed IRM batch(es) eligible for DGFT enquiry check.", pushedMasters.size());
+
+        for (IrmMessageMaster master : pushedMasters) {
+            try {
+                enquireSingleBatch(master);
+            } catch (Exception ex) {
+                log.error("DGFT enquiry failed for message master id {}", master.getId(), ex);
+            }
+        }
+    }
+
+    private void enquireSingleBatch(IrmMessageMaster master) {
+
+        List<IrmMessageDetail> details =
+                irmMessageDetailRepository.findByDgftIrmMsgMasterId(master.getId());
+
+        // Only carry forward IRM master rows not already confirmed by a
+        // previous enquiry run (guards against re-processing every tick).
+        List<IrmMaster> pendingIrmMasters = new ArrayList<>();
+
+        for (IrmMessageDetail detail : details) {
+            irmMasterRepository.findByIrmNumber(detail.getIrmNumber()).ifPresent(irmMaster -> {
+                if (!AppConstants.MSG_PUSH_SUCCESS.equals(irmMaster.getMasterDetailStatus())) {
+                    pendingIrmMasters.add(irmMaster);
+                }
+            });
+        }
+
+        if (pendingIrmMasters.isEmpty()) {
+            log.debug("Message master id {} already confirmed by a previous enquiry run - skipping.",
+                    master.getId());
+            return;
+        }
+
+        ApiResponseDto<String> response = dgftEnquiryApiClient.enquireStatus(master.getUniqueTxId());
+
+        if (response == null || !response.isSuccess()) {
+            log.error("DGFT enquiry did not return a validated status for uniqueTxId {}. Message: {}",
+                    master.getUniqueTxId(),
+                    response == null ? "no response" : response.getMessage());
+            return;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        for (IrmMaster irmMaster : pendingIrmMasters) {
+
+            irmMaster.setFlag(AppConstants.FLAG_PUSHED_TO_STAGING);
+            irmMaster.setStatus(AppConstants.STATUS_ACTIVE);
+            irmMaster.setDgftFlag(AppConstants.DGFT_FLAG_FRESH);
+            irmMaster.setDgftStatus(AppConstants.DGFT_STATUS_VALIDATED);
+            irmMaster.setMasterDetailStatus(AppConstants.MSG_PUSH_SUCCESS);
+            irmMaster.setModifiedBy(systemUser);
+            irmMaster.setModifiedDate(now);
+
+            irmMasterRepository.save(irmMaster);
+
+            irmMasterHisRepository.save(IrmMasterHisMapper.fromMaster(
+                    irmMaster, AppConstants.TRIGGER_STATUS_ENQUIRY_VALIDATED, IdGenerator.next(), now));
+        }
+
+        log.info("DGFT enquiry confirmed for uniqueTxId {}. {} dgft_irm_master row(s) updated.",
+                master.getUniqueTxId(), pendingIrmMasters.size());
+    }
+}
+
+
+=====================================================================
+5. DgftIrmEnquiryScheduler.java  (NEW)
+=====================================================================
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.service.DgftIrmEnquiryService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * DGFT IRM Enquiry Service Scheduler (Step 4).
+ * Executes periodically to review the DGFT status of IRM batches
+ * already pushed to the staging table and reflect confirmed progress
+ * onto dgft_irm_master.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class DgftIrmEnquiryScheduler {
+
+    private final DgftIrmEnquiryService dgftIrmEnquiryService;
+
+    @Value("${dgft.scheduler.irm-enquiry.enabled}")
+    private boolean enabled;
+
+    @Scheduled(cron = "${dgft.scheduler.irm-enquiry.cron}")
+    public void executeIrmEnquiryJob() {
+
+        if (!enabled) {
+            log.info("DGFT IRM Enquiry Scheduler is disabled.");
+            return;
+        }
+
+        log.info("DGFT IRM Enquiry Scheduler triggered.");
+        try {
+            dgftIrmEnquiryService.enquireIrmStatus();
+            log.info("DGFT IRM Enquiry Scheduler execution completed successfully.");
+        } catch (Exception ex) {
+            log.error("DGFT IRM Enquiry Scheduler execution failed.", ex);
+        }
+    }
+}
+
+
+=====================================================================
+6. AppConstants.java  (APPEND ONLY - add inside the existing class,
+   nothing else in the file changes)
+=====================================================================
+    // dgft_irm_master_his trigger status value used by Step 4 (Enquiry scheduler)
+    public static final String TRIGGER_STATUS_ENQUIRY_VALIDATED = "ENQUIRY_VALIDATED";
+
+
+=====================================================================
+7. application.properties  (ADD THESE 2 LINES)
+=====================================================================
+Add near the existing dgft.scheduler.* lines:
+
+dgft.scheduler.irm-enquiry.enabled=true
+# every 5 minutes
+dgft.scheduler.irm-enquiry.cron=0 */5 * * * *
+
+(Matches the enabled/cron pattern already used by Steps 2 and 3.)
+
+=====================================================================
+HOW TO VERIFY AFTER DEPLOYING
+=====================================================================
+1. Confirm a batch exists in MSG_PUSH_SUCCESS state (from Step 3):
+   SELECT ID, UNIQUE_TX_ID, STATUS FROM dgft_irm_message_master
+   WHERE STATUS = 'MSG_PUSH_SUCCESS';
+
+2. Wait for the enquiry scheduler tick, then check the linked
+   dgft_irm_master row(s):
+   SELECT IRM_NUMBER, FLAG, STATUS, DGFT_FLAG, DGFT_STATUS,
+          MASTER_DETAIL_STATUS, MODIFIED_DATE
+   FROM dgft_irm_master
+   WHERE IRM_NUMBER IN (
+       SELECT IRM_NUMBER FROM dgft_irm_message_detail
+       WHERE DGFT_IRM_MSG_MASTER_ID = '<message master id from step 1>'
+   );
+   -- Expect: FLAG=P, STATUS=ACTIVE, DGFT_FLAG=F,
+   --         DGFT_STATUS=Validated, MASTER_DETAIL_STATUS=MSG_PUSH_SUCCESS
+
+3. Confirm an audit entry was written:
+   SELECT IRM_NUMBER, TRIGGER_STATUS, TRIGGER_DATE
+   FROM dgft_irm_master_his
+   WHERE IRM_NUMBER = '<irm number>'
+   ORDER BY TRIGGER_DATE DESC;
+   -- Expect a row with TRIGGER_STATUS = 'ENQUIRY_VALIDATED'
+
+4. Run the scheduler again - the same IRM row should NOT be
+   re-updated or re-logged (MASTER_DETAIL_STATUS already =
+   MSG_PUSH_SUCCESS acts as the guard).
+
+=====================================================================
+END OF FILE
+=====================================================================

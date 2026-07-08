@@ -44,6 +44,45 @@ public final class AppConstants {
 
     // dgft_irm_master_his trigger status value used by Step 4 (Enquiry scheduler)
     public static final String TRIGGER_STATUS_ENQUIRY_VALIDATED = "ENQUIRY_VALIDATED";
+
+
+    
+    // dgft_irm_message_master / dgft_irm_message_detail values used by Step 5
+    // (DGFT API IRM Processed Status Service Scheduler)
+    public static final String MSG_PUSH_PENDING_PROCESS = "MSG_PUSH_PENDING_PROCESS";
+    public static final String MSG_PUSH_FULLY_PROCESSED = "MSG_PUSH_FULLY_PROCESSED";
+ 
+    // NOTE: spec explicitly gives this as all-caps "FAILED", distinct from
+    // DGFT_STATUS_FAILED ("Failed") used elsewhere - verify with source doc.
+    public static final String MSG_MASTER_ACK_STATUS_FAILED_ALL = "FAILED";
+ 
+    public static final String MSG_DETAIL_STATUS_PROCESSED = "PROCESSED";
+    public static final String MSG_DETAIL_STATUS_FAILED = "FAILED";
+    public static final String MSG_DETAIL_ACK_STATUS_ERRORED = "Errored";
+ 
+    // Reused existing constants (no change needed):
+    //   DGFT_STATUS_VALIDATED  = "Validated"   -> used for "pending review" ack status
+    //   DGFT_STATUS_PROCESSED  = "Processed"   -> used for "fully processed" ack status
+    //   MSG_PUSH_SUCCESS       = "MSG_PUSH_SUCCESS"        -> Step 3 output picked up by Step 5
+    //   MSG_PUSH_PROCESS_FAILED = "MSG_PUSH_PROCESS_FAILED" -> reused as terminal all-failed master status
+    //   MSG_DETAIL_STATUS_PENDING = "PENDING"  -> reused for still-pending detail rows
+
+
+
+    // dgft_irm_master values used by Step 6 (final status sync from staging)
+    public static final String FLAG_PROCESSED_ACTIVE = "A";
+    public static final String FLAG_PROCESSED_FAILED = "F";
+    public static final String TRIGGER_STATUS_FINAL_STATUS_SYNCED = "FINAL_STATUS_SYNCED";
+ 
+    // Reused existing constants (no change needed):
+    //   STATUS_ACTIVE               = "ACTIVE"
+    //   DGFT_FLAG_FRESH             = "F"
+    //   DGFT_STATUS_PROCESSED       = "Processed"   -> mapped to spec's "PROCESSED"
+    //   DGFT_STATUS_FAILED          = "Failed"      -> mapped to spec's "FAILED"
+    //   MSG_PUSH_FULLY_PROCESSED    = "MSG_PUSH_FULLY_PROCESSED"  (Step 5 constant)
+    //   MSG_PUSH_PROCESS_FAILED     = "MSG_PUSH_PROCESS_FAILED"   (Step 5 constant)
+    //   MSG_DETAIL_STATUS_PROCESSED = "PROCESSED"                 (Step 5 constant)
+    //   MSG_DETAIL_STATUS_FAILED    = "FAILED"                    (Step 5 constant)
 }
 
 

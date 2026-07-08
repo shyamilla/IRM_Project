@@ -11,5 +11,5 @@ public interface IrmMessageMasterRepository extends JpaRepository<IrmMessageMast
     Optional<IrmMessageMaster> findByUniqueTxId(String uniqueTxId);
 
         List<IrmMessageMaster> findByStatus(String status);
-
+      List<IrmMessageMaster> findByStatusIn(List<String> statuses);
 }

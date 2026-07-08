@@ -1,0 +1,457 @@
+=====================================================================
+STEP 5 - DGFT API IRM Processed Status Service Scheduler
+=====================================================================
+
+=====================================================================
+CATEGORY 1: EXISTING FILES TO BE UPDATED
+=====================================================================
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/constants/AppConstants.java
+ACTION: ADD new constants (do not remove existing ones)
+---------------------------------------------------------------------
+
+    // dgft_irm_message_master / dgft_irm_message_detail values used by Step 5
+    // (DGFT API IRM Processed Status Service Scheduler)
+    public static final String MSG_PUSH_PENDING_PROCESS = "MSG_PUSH_PENDING_PROCESS";
+    public static final String MSG_PUSH_FULLY_PROCESSED = "MSG_PUSH_FULLY_PROCESSED";
+
+    // NOTE: spec explicitly gives this as all-caps "FAILED", distinct from
+    // DGFT_STATUS_FAILED ("Failed") used elsewhere - verify with source doc.
+    public static final String MSG_MASTER_ACK_STATUS_FAILED_ALL = "FAILED";
+
+    public static final String MSG_DETAIL_STATUS_PROCESSED = "PROCESSED";
+    public static final String MSG_DETAIL_STATUS_FAILED = "FAILED";
+    public static final String MSG_DETAIL_ACK_STATUS_ERRORED = "Errored";
+
+    // Reused existing constants (no change needed):
+    //   DGFT_STATUS_VALIDATED  = "Validated"   -> used for "pending review" ack status
+    //   DGFT_STATUS_PROCESSED  = "Processed"   -> used for "fully processed" ack status
+    //   MSG_PUSH_SUCCESS       = "MSG_PUSH_SUCCESS"        -> Step 3 output picked up by Step 5
+    //   MSG_PUSH_PROCESS_FAILED = "MSG_PUSH_PROCESS_FAILED" -> reused as terminal all-failed master status
+    //   MSG_DETAIL_STATUS_PENDING = "PENDING"  -> reused for still-pending detail rows
+
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/repository/IrmMessageMasterRepository.java
+ACTION: ADD one new method to the interface
+---------------------------------------------------------------------
+
+    List<IrmMessageMaster> findByStatusIn(List<String> statuses);
+
+
+---------------------------------------------------------------------
+FILE: src/main/resources/application.properties
+ACTION: ADD scheduler config properties
+---------------------------------------------------------------------
+
+    dgft.scheduler.irm-processed-status.enabled=true
+    dgft.scheduler.irm-processed-status.cron=0 */5 * * * *
+
+
+=====================================================================
+CATEGORY 2: NEW FILES TO BE CREATED
+=====================================================================
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/scheduler/DgftIrmProcessedStatusApiClient.java
+PACKAGE: com.dgft.irm.scheduler
+---------------------------------------------------------------------
+
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.dto.response.ApiResponseDto;
+import com.dgft.irm.dto.response.RecordResultDto;
+
+import java.util.List;
+
+/**
+ * DGFT "get response status" API contract used by Step 5. Given the
+ * unique transaction id of a batch already pushed (Step 3) and the IRM
+ * reference numbers reported in that batch, returns DGFT's current
+ * review outcome for each record.
+ *
+ * Contract:
+ *   - ApiResponseDto.success = false            -> call/transport failure (retry later)
+ *   - ApiResponseDto.success = true, data empty -> DGFT has not reviewed yet
+ *   - ApiResponseDto.success = true, data populated -> DGFT has reviewed;
+ *     each RecordResultDto.success indicates pass/fail for that record,
+ *     RecordResultDto.reasons carries failure detail(s).
+ */
+public interface DgftIrmProcessedStatusApiClient {
+
+    ApiResponseDto<List<RecordResultDto>> getProcessedStatus(String uniqueTxId, List<String> irmRefNumbers);
+}
+
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/scheduler/MockDgftIrmProcessedStatusApiClient.java
+PACKAGE: com.dgft.irm.scheduler
+---------------------------------------------------------------------
+
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.dto.response.ApiResponseDto;
+import com.dgft.irm.dto.response.RecordResultDto;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+/**
+ * Mock implementation active only under the "mock" profile. Simulates DGFT
+ * having already reviewed every record and returning a success outcome for
+ * each, so the full Step 5 flow can be exercised end-to-end in dev/test.
+ *
+ * A real implementation (e.g. RealDgftIrmProcessedStatusApiClient) can later
+ * be added under a different @Profile, with no changes needed to
+ * DgftIrmProcessedStatusServiceImpl.
+ */
+@Slf4j
+@Component
+@Profile("mock")
+public class MockDgftIrmProcessedStatusApiClient implements DgftIrmProcessedStatusApiClient {
+
+    @Override
+    public ApiResponseDto<List<RecordResultDto>> getProcessedStatus(String uniqueTxId, List<String> irmRefNumbers) {
+
+        log.info("[MOCK DGFT] Simulating processed-status check for uniqueTxId [{}], {} record(s).",
+                uniqueTxId, irmRefNumbers == null ? 0 : irmRefNumbers.size());
+
+        List<RecordResultDto> results = (irmRefNumbers == null ? List.<String>of() : irmRefNumbers).stream()
+                .map(irmRefNumber -> new RecordResultDto(0, irmRefNumber, true, "MOCK-ACK-" + irmRefNumber, null))
+                .collect(Collectors.toList());
+
+        return ApiResponseDto.ok("DGFT processed-status check successful (mock)", results);
+    }
+}
+
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/service/DgftIrmProcessedStatusService.java
+PACKAGE: com.dgft.irm.service
+---------------------------------------------------------------------
+
+package com.dgft.irm.service;
+
+public interface DgftIrmProcessedStatusService {
+
+    /**
+     * Checks DGFT's review outcome for IRM batches already pushed via API
+     * (Step 3) and updates the staging tables (DGFT_IRM_MESSAGE_MASTER /
+     * DGFT_IRM_MESSAGE_DETAIL) to reflect Pending / Processed / Failed
+     * outcomes. Does not touch dgft_irm_master.
+     */
+    void checkProcessedStatus();
+}
+
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/serviceimpl/DgftIrmProcessedStatusServiceImpl.java
+PACKAGE: com.dgft.irm.serviceimpl
+---------------------------------------------------------------------
+
+package com.dgft.irm.serviceimpl;
+
+import com.dgft.irm.constants.AppConstants;
+import com.dgft.irm.dto.response.ApiResponseDto;
+import com.dgft.irm.dto.response.RecordResultDto;
+import com.dgft.irm.entity.IrmMessageDetail;
+import com.dgft.irm.entity.IrmMessageMaster;
+import com.dgft.irm.entity.IrmMsgTxStatusLog;
+import com.dgft.irm.repository.IrmMessageDetailRepository;
+import com.dgft.irm.repository.IrmMessageMasterRepository;
+import com.dgft.irm.repository.IrmMsgTxStatusLogRepository;
+import com.dgft.irm.scheduler.DgftIrmProcessedStatusApiClient;
+import com.dgft.irm.service.DgftIrmProcessedStatusService;
+import com.dgft.irm.util.IdGenerator;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * Step 5 of the DGFT new-records flow: "DGFT API IRM Processed Status
+ * Service Scheduler".
+ *
+ * Picks up batches previously pushed successfully (Step 3, STATUS =
+ * MSG_PUSH_SUCCESS) or already checked once and still awaiting DGFT review
+ * (STATUS = MSG_PUSH_PENDING_PROCESS), calls DGFT's "get response status"
+ * API, and updates the staging tables only:
+ *
+ *   Still pending review:
+ *     MASTER : DGFT_ACK_STATUS = Validated, STATUS = MSG_PUSH_PENDING_PROCESS
+ *     DETAIL : STATUS = PENDING,            DGFT_ACK_STATUS = Validated
+ *
+ *   Reviewed, all records succeeded:
+ *     MASTER : DGFT_ACK_STATUS = Processed, STATUS = MSG_PUSH_FULLY_PROCESSED
+ *     DETAIL : STATUS = PROCESSED,          DGFT_ACK_STATUS = Processed
+ *
+ *   Reviewed, all records failed:
+ *     MASTER : DGFT_ACK_STATUS = FAILED,    STATUS = MSG_PUSH_PROCESS_FAILED
+ *     DETAIL : STATUS = FAILED,             DGFT_ACK_STATUS = Errored
+ *
+ *   Reviewed, some records failed (partial):
+ *     MASTER : DGFT_ACK_STATUS = Processed, STATUS = MSG_PUSH_FULLY_PROCESSED
+ *     DETAIL (failed ones)   : STATUS = FAILED,    DGFT_ACK_STATUS = Errored
+ *     DETAIL (succeeded ones): STATUS = PROCESSED, DGFT_ACK_STATUS = Processed
+ *
+ * MSG_PUSH_FULLY_PROCESSED / MSG_PUSH_PROCESS_FAILED are terminal - such
+ * masters are no longer picked up by subsequent runs.
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DgftIrmProcessedStatusServiceImpl implements DgftIrmProcessedStatusService {
+
+    private final IrmMessageMasterRepository irmMessageMasterRepository;
+    private final IrmMessageDetailRepository irmMessageDetailRepository;
+    private final IrmMsgTxStatusLogRepository irmMsgTxStatusLogRepository;
+    private final DgftIrmProcessedStatusApiClient dgftIrmProcessedStatusApiClient;
+
+    @Value("${dgft.audit.system-user}")
+    private String systemUser;
+
+    @Override
+    @Transactional
+    public void checkProcessedStatus() {
+
+        List<IrmMessageMaster> candidates = irmMessageMasterRepository.findByStatusIn(
+                List.of(AppConstants.MSG_PUSH_SUCCESS, AppConstants.MSG_PUSH_PENDING_PROCESS));
+
+        if (candidates.isEmpty()) {
+            log.info("No IRM batches awaiting DGFT processed-status check.");
+            return;
+        }
+
+        log.info("Found {} IRM batch(es) eligible for DGFT processed-status check.", candidates.size());
+
+        for (IrmMessageMaster master : candidates) {
+            try {
+                checkSingleBatch(master);
+            } catch (Exception ex) {
+                log.error("DGFT processed-status check failed for message master id {}", master.getId(), ex);
+            }
+        }
+    }
+
+    private void checkSingleBatch(IrmMessageMaster master) {
+
+        List<IrmMessageDetail> details =
+                irmMessageDetailRepository.findByDgftIrmMsgMasterId(master.getId());
+
+        if (details.isEmpty()) {
+            log.warn("Message master id {} has no detail rows - skipping.", master.getId());
+            return;
+        }
+
+        List<String> irmRefNumbers = details.stream()
+                .map(IrmMessageDetail::getIrmNumber)
+                .collect(Collectors.toList());
+
+        ApiResponseDto<List<RecordResultDto>> response =
+                dgftIrmProcessedStatusApiClient.getProcessedStatus(master.getUniqueTxId(), irmRefNumbers);
+
+        if (response == null || !response.isSuccess()) {
+            log.error("DGFT processed-status call failed for uniqueTxId {}. Message: {}",
+                    master.getUniqueTxId(), response == null ? "no response" : response.getMessage());
+            return;
+        }
+
+        List<RecordResultDto> results = response.getData();
+        LocalDateTime now = LocalDateTime.now();
+
+        if (results == null || results.isEmpty()) {
+            markStillPending(master, details, now);
+            return;
+        }
+
+        applyReviewedOutcome(master, details, results, now);
+    }
+
+    private void markStillPending(IrmMessageMaster master, List<IrmMessageDetail> details, LocalDateTime now) {
+
+        master.setDgftAckStatus(AppConstants.DGFT_STATUS_VALIDATED);
+        master.setStatus(AppConstants.MSG_PUSH_PENDING_PROCESS);
+        master.setDgftLastTxStatusInitTime(now);
+        master.setModifiedBy(systemUser);
+        master.setModifiedDate(now);
+        irmMessageMasterRepository.save(master);
+
+        for (IrmMessageDetail detail : details) {
+            detail.setStatus(AppConstants.MSG_DETAIL_STATUS_PENDING);
+            detail.setDgftAckStatus(AppConstants.DGFT_STATUS_VALIDATED);
+            detail.setModifiedBy(systemUser);
+            detail.setModifiedDate(now);
+            irmMessageDetailRepository.save(detail);
+        }
+
+        saveStatusLog(master.getId(),
+                buildStatusJson(master.getUniqueTxId(), AppConstants.MSG_PUSH_PENDING_PROCESS, details.size()));
+
+        log.info("DGFT has not yet reviewed uniqueTxId {}. Marked as {}.",
+                master.getUniqueTxId(), AppConstants.MSG_PUSH_PENDING_PROCESS);
+    }
+
+    private void applyReviewedOutcome(IrmMessageMaster master, List<IrmMessageDetail> details,
+                                       List<RecordResultDto> results, LocalDateTime now) {
+
+        Map<String, RecordResultDto> resultsByIrmNumber = results.stream()
+                .collect(Collectors.toMap(RecordResultDto::getIrmRefNumber, Function.identity(), (a, b) -> a));
+
+        int total = details.size();
+        int failedCount = 0;
+
+        for (IrmMessageDetail detail : details) {
+
+            RecordResultDto result = resultsByIrmNumber.get(detail.getIrmNumber());
+
+            if (result == null) {
+                // DGFT didn't report on this record yet within this response -
+                // leave it pending, don't force an outcome onto it.
+                continue;
+            }
+
+            if (result.isSuccess()) {
+                detail.setStatus(AppConstants.MSG_DETAIL_STATUS_PROCESSED);
+                detail.setDgftAckStatus(AppConstants.DGFT_STATUS_PROCESSED);
+            } else {
+                failedCount++;
+                detail.setStatus(AppConstants.MSG_DETAIL_STATUS_FAILED);
+                detail.setDgftAckStatus(AppConstants.MSG_DETAIL_ACK_STATUS_ERRORED);
+                detail.setDgftErrorDetails(result.getReasons() == null
+                        ? null
+                        : String.join("; ", result.getReasons()));
+            }
+
+            detail.setModifiedBy(systemUser);
+            detail.setModifiedDate(now);
+            irmMessageDetailRepository.save(detail);
+        }
+
+        boolean allFailed = failedCount == total;
+
+        if (allFailed) {
+            master.setDgftAckStatus(AppConstants.MSG_MASTER_ACK_STATUS_FAILED_ALL);
+            master.setStatus(AppConstants.MSG_PUSH_PROCESS_FAILED);
+        } else {
+            master.setDgftAckStatus(AppConstants.DGFT_STATUS_PROCESSED);
+            master.setStatus(AppConstants.MSG_PUSH_FULLY_PROCESSED);
+        }
+
+        master.setDgftLastTxStatusInitTime(now);
+        master.setModifiedBy(systemUser);
+        master.setModifiedDate(now);
+        irmMessageMasterRepository.save(master);
+
+        saveStatusLog(master.getId(), buildStatusJson(master.getUniqueTxId(), master.getStatus(), total));
+
+        log.info("DGFT reviewed uniqueTxId {}: {}/{} failed. Master marked as {}.",
+                master.getUniqueTxId(), failedCount, total, master.getStatus());
+    }
+
+    private void saveStatusLog(String messageMasterId, String json) {
+
+        IrmMsgTxStatusLog statusLog = new IrmMsgTxStatusLog();
+        statusLog.setId(IdGenerator.next());
+        statusLog.setDgftIrmMsgMasterId(messageMasterId);
+        statusLog.setDgftTxStatusJsonObj(json);
+        statusLog.setAddedBy(systemUser);
+        statusLog.setAddedDate(LocalDateTime.now());
+
+        irmMsgTxStatusLogRepository.save(statusLog);
+    }
+
+    private String buildStatusJson(String uniqueTxId, String transactionStatus, int recordCount) {
+        return """
+                {
+                  "uniqueTxId":"%s",
+                  "transactionStatus":"%s",
+                  "recordCount":%d
+                }
+                """.formatted(uniqueTxId, transactionStatus, recordCount);
+    }
+}
+
+
+---------------------------------------------------------------------
+FILE: src/main/java/com/dgft/irm/scheduler/DgftIrmProcessedStatusScheduler.java
+PACKAGE: com.dgft.irm.scheduler
+---------------------------------------------------------------------
+
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.service.DgftIrmProcessedStatusService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * DGFT API IRM Processed Status Service Scheduler (Step 5).
+ * Executes periodically to check whether IRM batches previously pushed
+ * via API have been reviewed by DGFT, and to reflect the outcome
+ * (still pending / fully processed / failed) on the staging tables.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class DgftIrmProcessedStatusScheduler {
+
+    private final DgftIrmProcessedStatusService dgftIrmProcessedStatusService;
+
+    @Value("${dgft.scheduler.irm-processed-status.enabled}")
+    private boolean enabled;
+
+    @Scheduled(cron = "${dgft.scheduler.irm-processed-status.cron}")
+    public void executeIrmProcessedStatusJob() {
+
+        if (!enabled) {
+            log.info("DGFT API IRM Processed Status Scheduler is disabled.");
+            return;
+        }
+
+        log.info("DGFT API IRM Processed Status Scheduler triggered.");
+        try {
+            dgftIrmProcessedStatusService.checkProcessedStatus();
+            log.info("DGFT API IRM Processed Status Scheduler execution completed successfully.");
+        } catch (Exception ex) {
+            log.error("DGFT API IRM Processed Status Scheduler execution failed.", ex);
+        }
+    }
+}
+
+
+=====================================================================
+OPEN ITEMS TO CONFIRM
+=====================================================================
+
+1. RecordResultDto reuse:
+   The CSV-ingestion DTO (rowNumber, irmRefNumber, success, generatedId,
+   reasons) is reused here for the DGFT API response shape. If DGFT's
+   actual "get response status" response has a different structure
+   (e.g. a separate error code field), a dedicated DTO should replace
+   this reuse.
+
+2. Records absent from DGFT's response:
+   If DGFT's response omits a record entirely (neither success nor
+   failure reported), the current logic leaves that detail row
+   untouched (still PENDING) rather than forcing an outcome. Confirm
+   this is the desired behavior.
+
+3. Master DGFT_ACK_STATUS casing for "all failed" case:
+   Spec gives this as all-caps "FAILED", which differs from the
+   "Failed" casing used elsewhere in AppConstants (DGFT_STATUS_FAILED).
+   Implemented exactly as specified (MSG_MASTER_ACK_STATUS_FAILED_ALL =
+   "FAILED") - verify against the source requirements doc in case it's
+   a typo.

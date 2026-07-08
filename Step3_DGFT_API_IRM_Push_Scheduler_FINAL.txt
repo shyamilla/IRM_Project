@@ -1,0 +1,356 @@
+=====================================================================
+STEP 3: DGFT API IRM PUSH SERVICE SCHEDULER - CORRECTED & COMPLETE
+=====================================================================
+Reviewed against: github.com/shyamilla/IRM_Project
+                  (src/main/java/com/dgft/irm)
+
+This replaces the previously checked-in Step 3 code, which had a
+critical bug (see #1 below) that meant the scheduler would NEVER
+process any records.
+
+---------------------------------------------------------------------
+BUGS FOUND IN THE EXISTING REPO CODE, AND WHAT WAS FIXED
+---------------------------------------------------------------------
+1. CRITICAL: DgftIrmApiPushServiceImpl queried
+       irmMessageMasterRepository.findByStatus("PENDING_PUSH")
+   but Step 2 (DgftIrmPushServiceImpl) sets the master row's STATUS to
+   AppConstants.MSG_MASTER_STATUS_NEW ("MSG_PUSH_NEW"). "PENDING_PUSH"
+   is never written anywhere in the codebase, so this query always
+   returned an empty list -> the scheduler ran but did nothing, ever.
+   FIX: query by AppConstants.MSG_MASTER_STATUS_NEW.
+
+2. Hardcoded strings ("Validated", "PENDING", "SYSTEM") were used
+   instead of the constants already defined in AppConstants.java.
+   FIX: replaced every literal with the matching AppConstants field.
+
+3. AppConstants.MSG_PUSH_PROCESS_FAILED and DGFT_STATUS_FAILED exist
+   specifically for this step's failure path but were never used -
+   a failed push silently left the master row's STATUS/ACK unchanged
+   apart from an error message.
+   FIX: added handlePushFailure() which sets STATUS = MSG_PUSH_PROCESS_FAILED
+   and DGFT_ACK_STATUS = DGFT_STATUS_FAILED.
+
+4. dgft_irm_master.DGFT_STATUS (the source-of-truth IRM row, not the
+   staging copy) was never updated after a successful push. Per the
+   comment in AppConstants.java ("dgft_irm_master values used by
+   Step 3+"), DGFT_STATUS_VALIDATED belongs here.
+   FIX: for every pushed detail row, look up the matching IrmMaster by
+   IRM_NUMBER and set DGFT_STATUS = Validated.
+
+5. No entry was written to dgft_irm_msg_tx_status_log. Step 2 logs
+   every state transition there; Step 3 did not, breaking the audit
+   trail for this table.
+   FIX: added saveStatusLog(...), mirroring Step 2's pattern.
+
+6. MockDgftApiClient did NOT implement the DgftApiClient interface,
+   even though that interface's own Javadoc says "DGFT API contract
+   used by Step 3." It was a disconnected, orphaned class with its
+   own ad-hoc method signature.
+   FIX: MockDgftApiClient now implements DgftApiClient and is scoped
+   to @Profile("mock") (your application.properties already sets
+   spring.profiles.active=mock). A future real client can implement
+   the same interface under a different profile without touching the
+   service layer.
+
+7. JOB_USER was hardcoded to "SYSTEM", while Step 2 correctly injects
+   @Value("${dgft.audit.system-user}") (configured as SYSTEM_BATCH).
+   FIX: Step 3 now injects the same property for consistency.
+
+8. application.properties had no enabled/cron pair for this
+   scheduler (Step 2 has dgft.scheduler.irm-push.enabled/.cron).
+   FIX: added matching properties for Step 3 - see section 8 below.
+
+DESIGN DECISION LEFT OPEN (please confirm):
+   On a failed push, DGFT_IRM_MESSAGE_DETAIL rows are left untouched
+   (still STATUS = NEW, as Step 2 set them) rather than being marked
+   FAILED. This means once the master row is reset to MSG_PUSH_NEW
+   (manually or by a retry job), the same detail rows will be picked
+   up cleanly on the next run. If you'd rather the detail rows also
+   flip to a FAILED-type status immediately, tell me and I'll adjust.
+
+---------------------------------------------------------------------
+FILES CHANGED
+---------------------------------------------------------------------
+1. src/main/java/com/dgft/irm/scheduler/MockDgftApiClient.java   (rewritten)
+2. src/main/java/com/dgft/irm/serviceimpl/DgftIrmApiPushServiceImpl.java (rewritten)
+3. src/main/java/com/dgft/irm/scheduler/DgftIrmApiPushScheduler.java (updated)
+4. src/main/resources/application.properties (2 lines added)
+
+Unchanged (shown only for reference / no action needed):
+   - constants/AppConstants.java
+   - scheduler/DgftApiClient.java
+   - service/DgftIrmApiPushService.java
+   - entity/IrmMessageMaster.java, IrmMessageDetail.java, IrmMaster.java
+   - repository/IrmMessageMasterRepository.java,
+     IrmMessageDetailRepository.java, IrmMasterRepository.java,
+     IrmMsgTxStatusLogRepository.java
+
+=====================================================================
+1. MockDgftApiClient.java  (REWRITTEN)
+=====================================================================
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.dto.response.ApiResponseDto;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
+import org.springframework.stereotype.Component;
+
+/**
+ * Mock implementation of the DGFT API contract, active only under the
+ * "mock" profile (see application.properties: spring.profiles.active=mock).
+ * Simulates a successful DGFT acknowledgement with no real network call,
+ * so the full Step 3 push flow can be exercised end-to-end in dev/test.
+ *
+ * A real implementation (e.g. RealDgftApiClient) can later be added
+ * under a different @Profile, implementing the same DgftApiClient
+ * interface, with no changes needed to DgftIrmApiPushServiceImpl.
+ */
+@Slf4j
+@Component
+@Profile("mock")
+public class MockDgftApiClient implements DgftApiClient {
+
+    @Override
+    public ApiResponseDto<String> pushIrm(String requestJson) {
+
+        log.info("[MOCK DGFT] Simulating IRM push. Payload size: {} chars",
+                requestJson == null ? 0 : requestJson.length());
+
+        return ApiResponseDto.ok("IRM data validated by DGFT (mock)", requestJson);
+    }
+}
+
+
+=====================================================================
+2. DgftIrmApiPushServiceImpl.java  (REWRITTEN)
+=====================================================================
+package com.dgft.irm.serviceimpl;
+
+import com.dgft.irm.constants.AppConstants;
+import com.dgft.irm.dto.response.ApiResponseDto;
+import com.dgft.irm.entity.IrmMessageDetail;
+import com.dgft.irm.entity.IrmMessageMaster;
+import com.dgft.irm.entity.IrmMsgTxStatusLog;
+import com.dgft.irm.repository.IrmMasterRepository;
+import com.dgft.irm.repository.IrmMessageDetailRepository;
+import com.dgft.irm.repository.IrmMessageMasterRepository;
+import com.dgft.irm.repository.IrmMsgTxStatusLogRepository;
+import com.dgft.irm.scheduler.DgftApiClient;
+import com.dgft.irm.service.DgftIrmApiPushService;
+import com.dgft.irm.util.IdGenerator;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+/**
+ * Step 3 of the DGFT new-records flow: "DGFT API IRM Push Service Scheduler".
+ * Pushes DGFT_IRM_MESSAGE_MASTER rows that Step 2 staged (STATUS =
+ * MSG_PUSH_NEW) to the DGFT end via DgftApiClient, then updates:
+ *
+ *   DGFT_IRM_MESSAGE_MASTER : DGFT_ACK_STATUS = Validated
+ *                             STATUS          = MSG_PUSH_SUCCESS
+ *   DGFT_IRM_MESSAGE_DETAIL : DGFT_ACK_STATUS = null
+ *                             STATUS          = PENDING
+ *   DGFT_IRM_MASTER         : DGFT_STATUS     = Validated  (source-of-truth row)
+ *   DGFT_IRM_MSG_TX_STATUS_LOG : new audit entry for this transaction
+ *
+ * On failure:
+ *   DGFT_IRM_MESSAGE_MASTER : DGFT_ACK_STATUS = Failed
+ *                             STATUS          = MSG_PUSH_PROCESS_FAILED
+ *                             DGFT_MSG_PUSH_ERROR = <error message>
+ *   (detail rows and the source IRM master row are left untouched so a
+ *    reset-and-retry can pick the same batch back up cleanly)
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DgftIrmApiPushServiceImpl implements DgftIrmApiPushService {
+
+    private final IrmMessageMasterRepository irmMessageMasterRepository;
+    private final IrmMessageDetailRepository irmMessageDetailRepository;
+    private final IrmMasterRepository irmMasterRepository;
+    private final IrmMsgTxStatusLogRepository irmMsgTxStatusLogRepository;
+    private final DgftApiClient dgftApiClient;
+
+    @Value("${dgft.audit.system-user}")
+    private String systemUser;
+
+    @Override
+    @Transactional
+    public void pushIrmDetailsToDgft() {
+
+        List<IrmMessageMaster> pendingMasters =
+                irmMessageMasterRepository.findByStatus(AppConstants.MSG_MASTER_STATUS_NEW);
+
+        if (pendingMasters.isEmpty()) {
+            log.info("No IRM records pending push to DGFT.");
+            return;
+        }
+
+        log.info("Found {} IRM master record(s) pending push to DGFT.", pendingMasters.size());
+
+        for (IrmMessageMaster master : pendingMasters) {
+            try {
+                pushSingleRecord(master);
+            } catch (Exception ex) {
+                log.error("Failed to push IRM master record with id {} to DGFT", master.getId(), ex);
+                handlePushFailure(master, ex.getMessage());
+            }
+        }
+    }
+
+    private void pushSingleRecord(IrmMessageMaster master) {
+
+        ApiResponseDto<String> response = dgftApiClient.pushIrm(master.getRequestJsonObj());
+
+        if (response == null || !response.isSuccess()) {
+            handlePushFailure(master, response == null ? "No response from DGFT" : response.getMessage());
+            return;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        // ---- DGFT_IRM_MESSAGE_MASTER ----
+        master.setDgftAckStatus(AppConstants.DGFT_STATUS_VALIDATED);
+        master.setStatus(AppConstants.MSG_PUSH_SUCCESS);
+        master.setResponseJsonObj(response.getData());
+        master.setDgftMsgPushError(null);
+        master.setDgftPushInitTime(now);
+        master.setModifiedBy(systemUser);
+        master.setModifiedDate(now);
+        irmMessageMasterRepository.save(master);
+
+        // ---- DGFT_IRM_MESSAGE_DETAIL (linked rows) ----
+        List<IrmMessageDetail> details =
+                irmMessageDetailRepository.findByDgftIrmMsgMasterId(master.getId());
+
+        for (IrmMessageDetail detail : details) {
+            detail.setDgftAckStatus(null);
+            detail.setStatus(AppConstants.MSG_DETAIL_STATUS_PENDING);
+            detail.setModifiedBy(systemUser);
+            detail.setModifiedDate(now);
+            irmMessageDetailRepository.save(detail);
+
+            // ---- Reflect push success on the source-of-truth DGFT_IRM_MASTER row ----
+            irmMasterRepository.findByIrmNumber(detail.getIrmNumber()).ifPresent(irmMaster -> {
+                irmMaster.setDgftStatus(AppConstants.DGFT_STATUS_VALIDATED);
+                irmMaster.setModifiedBy(systemUser);
+                irmMaster.setModifiedDate(now);
+                irmMasterRepository.save(irmMaster);
+            });
+        }
+
+        saveStatusLog(master.getId(),
+                buildStatusJson(master.getUniqueTxId(), AppConstants.MSG_PUSH_SUCCESS, details.size()));
+
+        log.info("Successfully pushed IRM master id [{}] to DGFT. {} detail record(s) updated to PENDING.",
+                master.getId(), details.size());
+    }
+
+    private void handlePushFailure(IrmMessageMaster master, String errorMessage) {
+
+        LocalDateTime now = LocalDateTime.now();
+
+        master.setStatus(AppConstants.MSG_PUSH_PROCESS_FAILED);
+        master.setDgftAckStatus(AppConstants.DGFT_STATUS_FAILED);
+        master.setDgftMsgPushError(errorMessage);
+        master.setModifiedBy(systemUser);
+        master.setModifiedDate(now);
+        irmMessageMasterRepository.save(master);
+
+        saveStatusLog(master.getId(),
+                buildStatusJson(master.getUniqueTxId(), AppConstants.MSG_PUSH_PROCESS_FAILED, 0));
+
+        log.error("Marked IRM master id [{}] as {}. Reason: {}",
+                master.getId(), AppConstants.MSG_PUSH_PROCESS_FAILED, errorMessage);
+    }
+
+    private void saveStatusLog(String messageMasterId, String json) {
+
+        IrmMsgTxStatusLog statusLog = new IrmMsgTxStatusLog();
+        statusLog.setId(IdGenerator.next());
+        statusLog.setDgftIrmMsgMasterId(messageMasterId);
+        statusLog.setDgftTxStatusJsonObj(json);
+        statusLog.setAddedBy(systemUser);
+        statusLog.setAddedDate(LocalDateTime.now());
+
+        irmMsgTxStatusLogRepository.save(statusLog);
+    }
+
+    private String buildStatusJson(String uniqueTxId, String transactionStatus, int recordCount) {
+        return """
+                {
+                  "uniqueTxId":"%s",
+                  "transactionStatus":"%s",
+                  "recordCount":%d
+                }
+                """.formatted(uniqueTxId, transactionStatus, recordCount);
+    }
+}
+
+
+=====================================================================
+3. DgftIrmApiPushScheduler.java  (UPDATED)
+=====================================================================
+package com.dgft.irm.scheduler;
+
+import com.dgft.irm.service.DgftIrmApiPushService;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * DGFT API IRM Push Service Scheduler (Step 3).
+ * Executes periodically to push pending IRM details from the staging
+ * tables to the DGFT end via DgftIrmApiPushService.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class DgftIrmApiPushScheduler {
+
+    private final DgftIrmApiPushService dgftIrmApiPushService;
+
+    @Value("${dgft.scheduler.irm-api-push.enabled}")
+    private boolean enabled;
+
+    @Scheduled(cron = "${dgft.scheduler.irm-api-push.cron}")
+    public void executeIrmPushJob() {
+
+        if (!enabled) {
+            log.info("DGFT API IRM Push Scheduler is disabled.");
+            return;
+        }
+
+        log.info("DGFT API IRM Push Scheduler triggered.");
+        try {
+            dgftIrmApiPushService.pushIrmDetailsToDgft();
+            log.info("DGFT API IRM Push Scheduler execution completed successfully.");
+        } catch (Exception ex) {
+            log.error("DGFT API IRM Push Scheduler execution failed.", ex);
+        }
+    }
+}
+
+
+=====================================================================
+4. application.properties  (ADD THESE 2 LINES)
+=====================================================================
+Add near the existing dgft.scheduler.irm-push.* lines:
+
+dgft.scheduler.irm-api-push.enabled=true
+# every 5 minutes
+dgft.scheduler.irm-api-push.cron=0 */5 * * * *
+
+(Matches the enabled/cron pattern your Step 2 scheduler already uses.)
+
+=====================================================================
+END OF FILE
+=====================================================================
