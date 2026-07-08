@@ -1,44 +1,65 @@
 package com.dgft.irm.serviceimpl;
  
-import com.dgft.irm.dto.request.DgftIrmOutboundRequestDto;
-import com.dgft.irm.dto.response.DgftApiResponseDto;
+import com.dgft.irm.constants.AppConstants;
+import com.dgft.irm.dto.response.ApiResponseDto;
 import com.dgft.irm.entity.IrmMessageDetail;
 import com.dgft.irm.entity.IrmMessageMaster;
+import com.dgft.irm.entity.IrmMsgTxStatusLog;
+import com.dgft.irm.repository.IrmMasterRepository;
 import com.dgft.irm.repository.IrmMessageDetailRepository;
 import com.dgft.irm.repository.IrmMessageMasterRepository;
-import com.dgft.irm.scheduler.MockDgftApiClient;
+import com.dgft.irm.repository.IrmMsgTxStatusLogRepository;
+import com.dgft.irm.scheduler.DgftApiClient;
 import com.dgft.irm.service.DgftIrmApiPushService;
+import com.dgft.irm.util.IdGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
  
 import java.time.LocalDateTime;
 import java.util.List;
  
+/**
+ * Step 3 of the DGFT new-records flow: "DGFT API IRM Push Service Scheduler".
+ * Pushes DGFT_IRM_MESSAGE_MASTER rows that Step 2 staged (STATUS =
+ * MSG_PUSH_NEW) to the DGFT end via DgftApiClient, then updates:
+ *
+ *   DGFT_IRM_MESSAGE_MASTER : DGFT_ACK_STATUS = Validated
+ *                             STATUS          = MSG_PUSH_SUCCESS
+ *   DGFT_IRM_MESSAGE_DETAIL : DGFT_ACK_STATUS = null
+ *                             STATUS          = PENDING
+ *   DGFT_IRM_MASTER         : DGFT_STATUS     = Validated  (source-of-truth row)
+ *   DGFT_IRM_MSG_TX_STATUS_LOG : new audit entry for this transaction
+ *
+ * On failure:
+ *   DGFT_IRM_MESSAGE_MASTER : DGFT_ACK_STATUS = Failed
+ *                             STATUS          = MSG_PUSH_PROCESS_FAILED
+ *                             DGFT_MSG_PUSH_ERROR = <error message>
+ *   (detail rows and the source IRM master row are left untouched so a
+ *    reset-and-retry can pick the same batch back up cleanly)
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DgftIrmApiPushServiceImpl implements DgftIrmApiPushService {
  
-    // Status of a master record that is waiting to be pushed to DGFT.
-    // Adjust to match your actual staging table convention.
-    private static final String STATUS_PENDING_PUSH = "PENDING_PUSH";
-    private static final String STATUS_PUSH_SUCCESS = "MSG_PUSH_SUCCESS";
-    private static final String ACK_STATUS_VALIDATED = "Validated";
-    private static final String DETAIL_STATUS_PENDING = "PENDING";
-    private static final String JOB_USER = "SYSTEM";
- 
     private final IrmMessageMasterRepository irmMessageMasterRepository;
     private final IrmMessageDetailRepository irmMessageDetailRepository;
-    private final MockDgftApiClient mockDgftApiClient;
+    private final IrmMasterRepository irmMasterRepository;
+    private final IrmMsgTxStatusLogRepository irmMsgTxStatusLogRepository;
+    private final DgftApiClient dgftApiClient;
+ 
+    @Value("${dgft.audit.system-user}")
+    private String systemUser;
  
     @Override
     @Transactional
     public void pushIrmDetailsToDgft() {
  
         List<IrmMessageMaster> pendingMasters =
-                irmMessageMasterRepository.findByStatus(STATUS_PENDING_PUSH);
+                irmMessageMasterRepository.findByStatus(AppConstants.MSG_MASTER_STATUS_NEW);
  
         if (pendingMasters.isEmpty()) {
             log.info("No IRM records pending push to DGFT.");
@@ -52,47 +73,97 @@ public class DgftIrmApiPushServiceImpl implements DgftIrmApiPushService {
                 pushSingleRecord(master);
             } catch (Exception ex) {
                 log.error("Failed to push IRM master record with id {} to DGFT", master.getId(), ex);
-                master.setDgftMsgPushError(ex.getMessage());
-                master.setModifiedBy(JOB_USER);
-                master.setModifiedDate(LocalDateTime.now());
-                irmMessageMasterRepository.save(master);
+                handlePushFailure(master, ex.getMessage());
             }
         }
     }
  
     private void pushSingleRecord(IrmMessageMaster master) {
  
-        DgftIrmOutboundRequestDto requestDto = new DgftIrmOutboundRequestDto(null, null, null);
-        requestDto.setUniqueTxId(master.getUniqueTxId());
-        requestDto.setRequestJsonObj(master.getRequestJsonObj());
+        ApiResponseDto<String> response = dgftApiClient.pushIrm(master.getRequestJsonObj());
  
-        DgftApiResponseDto response = mockDgftApiClient.pushIrmDetails(requestDto);
+        if (response == null || !response.isSuccess()) {
+            handlePushFailure(master, response == null ? "No response from DGFT" : response.getMessage());
+            return;
+        }
  
         LocalDateTime now = LocalDateTime.now();
  
-        // ---- Update DGFT_IRM_MESSAGE_MASTER ----
-        master.setDgftAckStatus(ACK_STATUS_VALIDATED);
-        master.setStatus(STATUS_PUSH_SUCCESS);
-        master.setResponseJsonObj(response.getResponseJson());
+        // ---- DGFT_IRM_MESSAGE_MASTER ----
+        master.setDgftAckStatus(AppConstants.DGFT_STATUS_VALIDATED);
+        master.setStatus(AppConstants.MSG_PUSH_SUCCESS);
+        master.setResponseJsonObj(response.getData());
         master.setDgftMsgPushError(null);
         master.setDgftPushInitTime(now);
-        master.setModifiedBy(JOB_USER);
+        master.setModifiedBy(systemUser);
         master.setModifiedDate(now);
         irmMessageMasterRepository.save(master);
  
-        // ---- Update DGFT_IRM_MESSAGE_DETAIL (linked rows) ----
+        // ---- DGFT_IRM_MESSAGE_DETAIL (linked rows) ----
         List<IrmMessageDetail> details =
                 irmMessageDetailRepository.findByDgftIrmMsgMasterId(master.getId());
  
         for (IrmMessageDetail detail : details) {
             detail.setDgftAckStatus(null);
-            detail.setStatus(DETAIL_STATUS_PENDING);
-            detail.setModifiedBy(JOB_USER);
+            detail.setStatus(AppConstants.MSG_DETAIL_STATUS_PENDING);
+            detail.setModifiedBy(systemUser);
             detail.setModifiedDate(now);
+            irmMessageDetailRepository.save(detail);
+ 
+            // ---- Reflect push success on the source-of-truth DGFT_IRM_MASTER row ----
+            irmMasterRepository.findByIrmNumber(detail.getIrmNumber()).ifPresent(irmMaster -> {
+                irmMaster.setDgftStatus(AppConstants.DGFT_STATUS_VALIDATED);
+                irmMaster.setModifiedBy(systemUser);
+                irmMaster.setModifiedDate(now);
+                irmMasterRepository.save(irmMaster);
+            });
         }
-        irmMessageDetailRepository.saveAll(details);
+ 
+        saveStatusLog(master.getId(),
+                buildStatusJson(master.getUniqueTxId(), AppConstants.MSG_PUSH_SUCCESS, details.size()));
  
         log.info("Successfully pushed IRM master id [{}] to DGFT. {} detail record(s) updated to PENDING.",
                 master.getId(), details.size());
     }
+ 
+    private void handlePushFailure(IrmMessageMaster master, String errorMessage) {
+ 
+        LocalDateTime now = LocalDateTime.now();
+ 
+        master.setStatus(AppConstants.MSG_PUSH_PROCESS_FAILED);
+        master.setDgftAckStatus(AppConstants.DGFT_STATUS_FAILED);
+        master.setDgftMsgPushError(errorMessage);
+        master.setModifiedBy(systemUser);
+        master.setModifiedDate(now);
+        irmMessageMasterRepository.save(master);
+ 
+        saveStatusLog(master.getId(),
+                buildStatusJson(master.getUniqueTxId(), AppConstants.MSG_PUSH_PROCESS_FAILED, 0));
+ 
+        log.error("Marked IRM master id [{}] as {}. Reason: {}",
+                master.getId(), AppConstants.MSG_PUSH_PROCESS_FAILED, errorMessage);
+    }
+ 
+    private void saveStatusLog(String messageMasterId, String json) {
+ 
+        IrmMsgTxStatusLog statusLog = new IrmMsgTxStatusLog();
+        statusLog.setId(IdGenerator.next());
+        statusLog.setDgftIrmMsgMasterId(messageMasterId);
+        statusLog.setDgftTxStatusJsonObj(json);
+        statusLog.setAddedBy(systemUser);
+        statusLog.setAddedDate(LocalDateTime.now());
+ 
+        irmMsgTxStatusLogRepository.save(statusLog);
+    }
+ 
+    private String buildStatusJson(String uniqueTxId, String transactionStatus, int recordCount) {
+        return """
+                {
+                  "uniqueTxId":"%s",
+                  "transactionStatus":"%s",
+                  "recordCount":%d
+                }
+                """.formatted(uniqueTxId, transactionStatus, recordCount);
+    }
 }
+ 
