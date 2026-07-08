@@ -265,12 +265,12 @@ public class IrmIngestionServiceImpl implements IrmIngestionService {
 
                 // Save a snapshot of the newly created IRM into the history table.
                 // This preserves the initial state for audit and future tracking.
-                irmMasterHisRepository.save(
-                        IrmMasterHisMapper.fromMaster(
-                                entity,
-                                AppConstants.TRIGGER_STATUS_NEW_RECORD_INSERTED,
-                                IdGenerator.next(),
-                                now));
+                // irmMasterHisRepository.save(
+                //         IrmMasterHisMapper.fromMaster(
+                //                 entity,
+                //                 AppConstants.TRIGGER_STATUS_NEW_RECORD_INSERTED,
+                //                 IdGenerator.next(),
+                //                 now));
 
                 // Record successful processing for ACK file generation.
                 results.add(new RecordResultDto(
