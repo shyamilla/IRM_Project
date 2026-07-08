@@ -11,7 +11,7 @@ public class IrmMessageDetailResponseDto {
     private String dgftIrmMsgMasterId;
     private String irmNumber;
     private LocalDate irmIssueDate;
-    private Integer status;
+    private String status;
     private String dgftAckStatus;
     private String dgftErrorCodes;
     private String dgftErrorDetails;

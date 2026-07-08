@@ -7,12 +7,15 @@ import java.time.format.DateTimeFormatter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import com.dgft.irm.constants.AppConstants;
 import com.dgft.irm.dto.request.DgftIrmDto;
 import com.dgft.irm.dto.request.DgftIrmOutboundRequestDto;
 import com.dgft.irm.entity.IrmMaster;
 import com.dgft.irm.entity.IrmMessageDetail;
 import com.dgft.irm.entity.IrmMessageMaster;
 import com.dgft.irm.entity.IrmMsgTxStatusLog;
+import com.dgft.irm.mapper.IrmMasterHisMapper;
+import com.dgft.irm.repository.IrmMasterHisRepository;
 import com.dgft.irm.repository.IrmMasterRepository;
 import com.dgft.irm.repository.IrmMessageDetailRepository;
 import com.dgft.irm.repository.IrmMessageMasterRepository;
@@ -21,11 +24,24 @@ import com.dgft.irm.service.DgftIrmPushService;
 import com.dgft.irm.service.DgftMessageGenerationService;
 import com.dgft.irm.service.DgftMockApiService;
 import com.dgft.irm.util.IdGenerator;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+/**
+ * Step 2 of the DGFT new-records flow: "DGFT IRM Push Service Scheduler".
+ * Pushes fresh IRM_MASTER rows (DGFT_FLAG='F', DGFT_STATUS='Awaiting request
+ * initiated') into the intermediate staging tables (DGFT_IRM_MESSAGE_MASTER /
+ * DGFT_IRM_MESSAGE_DETAIL) and updates DGFT_IRM_MASTER per the flow doc:
+ *   FLAG            : P
+ *   STATUS          : ACTIVE (unchanged)
+ *   DGFT_FLAG       : F (unchanged)
+ *   DGFT_STATUS     : Request initiated
+ *   BANK_UNIQUE_TRANSACTION_ID : generated (== message master's unique tx id)
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -33,8 +49,10 @@ public class DgftIrmPushServiceImpl implements DgftIrmPushService {
 
     private final DgftMessageGenerationService dgftMessageGenerationService;
     private final DgftMockApiService dgftMockApiService;
+    private final ObjectMapper objectMapper;
 
     private final IrmMasterRepository irmMasterRepository;
+    private final IrmMasterHisRepository irmMasterHisRepository;
     private final IrmMessageMasterRepository irmMessageMasterRepository;
     private final IrmMessageDetailRepository irmMessageDetailRepository;
     private final IrmMsgTxStatusLogRepository irmMsgTxStatusLogRepository;
@@ -53,29 +71,33 @@ public class DgftIrmPushServiceImpl implements DgftIrmPushService {
                 dgftMessageGenerationService.generateFreshIrmJson();
 
         if (request.getIrmList() == null || request.getIrmList().isEmpty()) {
-            log.info("No eligible IRM records found to push to DGFT.");
+            log.info("No eligible IRM records found to push to staging tables.");
             return;
         }
 
         LocalDateTime now = LocalDateTime.now();
 
+        // ---- DGFT_IRM_MESSAGE_MASTER: basic details - unique tx id + request json ----
         IrmMessageMaster messageMaster = new IrmMessageMaster();
         messageMaster.setId(IdGenerator.next());
         messageMaster.setUniqueTxId(request.getUniqueTxId());
-        messageMaster.setStatus("JSON_PUSHED");
-        messageMaster.setDgftAckStatus("AWAITING_DGFT_ACK");
+        messageMaster.setRequestJsonObj(toJson(request));
+        messageMaster.setStatus(AppConstants.MSG_MASTER_STATUS_NEW);
+        messageMaster.setDgftAckStatus(AppConstants.MSG_MASTER_ACK_STATUS_REQUEST_INITIATED);
         messageMaster.setDgftPushInitTime(now);
         messageMaster.setAddedBy(systemUser);
         messageMaster.setAddedDate(now);
 
         irmMessageMasterRepository.save(messageMaster);
 
+        // Local persist to staging - not the real DGFT API call (that's Step 3).
+        // Kept as a defensive guard around the mock hand-off only.
         boolean success = dgftMockApiService.pushIrmToDgft(request);
 
         if (!success) {
             messageMaster.setStatus("FAILED");
             messageMaster.setDgftAckStatus("FAILED");
-            messageMaster.setDgftMsgPushError("Failed to push IRM records to DGFT mock API");
+            messageMaster.setDgftMsgPushError("Failed to stage IRM records for DGFT push");
             messageMaster.setModifiedBy(systemUser);
             messageMaster.setModifiedDate(LocalDateTime.now());
 
@@ -86,12 +108,13 @@ public class DgftIrmPushServiceImpl implements DgftIrmPushService {
                     createStatusSummaryJson(request, "FAILED")
             );
 
-            log.error("IRM JSON push failed. TxId={}", request.getUniqueTxId());
+            log.error("IRM staging push failed. TxId={}", request.getUniqueTxId());
             return;
         }
 
         for (DgftIrmDto irmDto : request.getIrmList()) {
 
+            // ---- DGFT_IRM_MESSAGE_DETAIL: status=NEW, ack status=null ----
             IrmMessageDetail detail = new IrmMessageDetail();
 
             detail.setId(IdGenerator.next());
@@ -104,33 +127,40 @@ public class DgftIrmPushServiceImpl implements DgftIrmPushService {
                 );
             }
 
-            detail.setStatus(1); // 1 = JSON_PUSHED
-            detail.setDgftAckStatus("AWAITING_DGFT_ACK");
+            detail.setStatus(AppConstants.MSG_DETAIL_STATUS_NEW);
+            detail.setDgftAckStatus(null);
             detail.setAddedBy(systemUser);
             detail.setAddedDate(now);
 
             irmMessageDetailRepository.save(detail);
 
+            // ---- DGFT_IRM_MASTER: FLAG=P, DGFT_FLAG stays F, DGFT_STATUS=Request initiated ----
             IrmMaster irmMaster = irmMasterRepository
                     .findByIrmNumber(irmDto.getIrmNumber())
                     .orElseThrow(() -> new RuntimeException(
                             "IRM not found: " + irmDto.getIrmNumber()
                     ));
 
-            irmMaster.setDgftFlag("P");
-            irmMaster.setDgftStatus("PUSH_REQUEST_SENT");
+            irmMaster.setFlag(AppConstants.FLAG_PUSHED_TO_STAGING);
+            irmMaster.setDgftStatus(AppConstants.DGFT_STATUS_REQUEST_INITIATED);
+            irmMaster.setBankUniqueTransactionId(request.getUniqueTxId());
             irmMaster.setModifiedBy(systemUser);
             irmMaster.setModifiedDate(now);
+            // DGFT_FLAG and STATUS intentionally untouched - flow doc keeps them F / ACTIVE here
 
             irmMasterRepository.save(irmMaster);
+
+            // audit trail entry for this state transition
+            irmMasterHisRepository.save(IrmMasterHisMapper.fromMaster(
+                    irmMaster, AppConstants.TRIGGER_STATUS_PUSHED_TO_STAGING, IdGenerator.next(), now));
         }
 
         saveStatusLog(
                 messageMaster.getId(),
-                createStatusSummaryJson(request, "JSON_PUSHED")
+                createStatusSummaryJson(request, AppConstants.MSG_MASTER_STATUS_NEW)
         );
 
-        log.info("IRM JSON successfully pushed and DB updated. TxId={}, Records={}",
+        log.info("IRM records staged for DGFT push. TxId={}, Records={}",
                 request.getUniqueTxId(),
                 request.getIrmList().size());
     }
@@ -162,5 +192,14 @@ public class DgftIrmPushServiceImpl implements DgftIrmPushService {
                 request.getUniqueTxId(),
                 transactionStatus,
                 request.getIrmList().size());
+    }
+
+    private String toJson(DgftIrmOutboundRequestDto request) {
+        try {
+            return objectMapper.writeValueAsString(request);
+        } catch (JsonProcessingException e) {
+            log.error("Failed to serialize outbound IRM request to JSON, TxId={}", request.getUniqueTxId(), e);
+            return null;
+        }
     }
 }

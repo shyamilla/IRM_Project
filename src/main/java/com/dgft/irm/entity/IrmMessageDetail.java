@@ -24,8 +24,8 @@ public class IrmMessageDetail {
     @Column(name = "IRM_ISSUE_DATE")
     private LocalDate irmIssueDate;
 
-    @Column(name = "STATUS")
-    private Integer status;
+    @Column(name = "STATUS", length = 10)
+    private String status;
 
     @Column(name = "DGFT_ACK_STATUS", length = 25)
     private String dgftAckStatus;
@@ -48,3 +48,4 @@ public class IrmMessageDetail {
     @Column(name = "MODIFIED_DATE")
     private LocalDateTime modifiedDate;
 }
+

@@ -12,4 +12,7 @@ public class DgftIrmOutboundRequestDto {
     private String uniqueTxId;
 
     private List<DgftIrmDto> irmList;
+
+    private String requestJsonObj;
+
 }

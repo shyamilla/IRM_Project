@@ -40,7 +40,7 @@ public class DgftMessageGenerationServiceImpl implements DgftMessageGenerationSe
                 .map(this::mapToDgftIrmDto)
                 .toList();
 
-        return new DgftIrmOutboundRequestDto(uniqueTxId, irmList);
+        return new DgftIrmOutboundRequestDto(uniqueTxId, irmList, uniqueTxId);
     }
 
     private DgftIrmDto mapToDgftIrmDto(IrmMaster irm) {

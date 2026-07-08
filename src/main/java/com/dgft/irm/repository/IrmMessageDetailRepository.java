@@ -9,4 +9,6 @@ import java.util.List;
 public interface IrmMessageDetailRepository extends JpaRepository<IrmMessageDetail, String> {
     List<IrmMessageDetail> findByDgftIrmMsgMasterId(String dgftIrmMsgMasterId);
     List<IrmMessageDetail> findByIrmNumber(String irmNumber);
+
+    
 }
