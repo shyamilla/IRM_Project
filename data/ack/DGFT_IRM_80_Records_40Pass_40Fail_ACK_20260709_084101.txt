@@ -1,0 +1,23 @@
+IRM_NUMBER|ROW_NUMBER|STATUS|REASON
+IRM300031|2|PASS|Inserted successfully with ID=ad343661-c1e4-4401-b0ee-27bf6d2cbc01
+IRM300032|3|PASS|Inserted successfully with ID=7ea0d74e-5e60-40cd-8f32-f368bdd56975
+IRM300033|4|PASS|Inserted successfully with ID=f08618a3-1ee8-445e-8659-26713c89e92a
+IRM300034|5|PASS|Inserted successfully with ID=616cdecf-7ba6-43c4-a5e6-34a7c939ea29
+IRM300035|6|PASS|Inserted successfully with ID=ab3d00e0-1151-4425-9bdc-b29febb8ba7e
+IRM300036|7|PASS|Inserted successfully with ID=af7f9ccf-d7ae-4781-bb34-381c3b3f710d
+IRM300037|8|PASS|Inserted successfully with ID=3f463a58-a17b-4ec5-bee1-51e30fadd76f
+IRM300038|9|PASS|Inserted successfully with ID=772fe27f-9603-4432-96ff-74739d6c7624
+IRM300039|10|PASS|Inserted successfully with ID=12e9f217-60ca-4650-bb22-fd7c37980f07
+IRM300040|11|PASS|Inserted successfully with ID=a3e67b06-2c4c-4764-8ec0-c9607b2552b9
+IRM400031|12|FAIL|Bank Reference Number must be max 20 alphanumeric/hyphen characters
+|13|FAIL|IRM Number must be alphanumeric; IRM Number is mandatory
+IRM-400033|14|FAIL|IRM Number must be alphanumeric
+IRM400034|15|FAIL|Remittance Amount must be numeric; Remittance Amount is mandatory
+IRM400035|16|FAIL|Remittance Amount must be numeric
+IRM400036|17|FAIL|Remittance Amount must be greater than 1
+IRM400037|18|FAIL|Remittance Amount must be numeric
+IRM400038|19|FAIL|Remittance Date must be dd/MM/yyyy; Remittance Date is mandatory
+IRM400039|20|FAIL|Remittance Date must be dd/MM/yyyy
+IRM400040|21|FAIL|Remittance Date cannot be in the future; Remittance Date cannot be after IRM Issue Date
+---
+TOTAL=20 PASS=10 FAIL=10

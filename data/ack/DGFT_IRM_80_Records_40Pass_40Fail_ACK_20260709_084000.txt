@@ -1,0 +1,23 @@
+IRM_NUMBER|ROW_NUMBER|STATUS|REASON
+IRM300011|2|PASS|Inserted successfully with ID=0788f5b6-8a92-4746-bf9c-a617805c6eea
+IRM300012|3|PASS|Inserted successfully with ID=097a9775-9b81-490c-b8bc-6af275601ce1
+IRM300013|4|PASS|Inserted successfully with ID=5e49a308-c3c8-48d6-9baa-3ba3db7c6fb2
+IRM300014|5|PASS|Inserted successfully with ID=76f9f910-f3be-4dc4-83a3-26359b359036
+IRM300015|6|PASS|Inserted successfully with ID=09a1f35d-46c1-4eec-b07d-a5dcd52ccde8
+IRM300016|7|PASS|Inserted successfully with ID=c73f7b6d-596d-4995-bc19-b43f49725ecb
+IRM300017|8|PASS|Inserted successfully with ID=248e67a6-67af-4013-b91d-bdbdbfc46a9d
+IRM300018|9|PASS|Inserted successfully with ID=3e641988-3aaa-45d6-b5e2-114774f49630
+IRM300019|10|PASS|Inserted successfully with ID=17573f3c-5b83-4dba-b957-09c4c4fc3947
+IRM300020|11|PASS|Inserted successfully with ID=b2fc508d-421c-4316-864c-577b00e392fe
+IRM400011|12|FAIL|AD Code must be alphanumeric; AD Code is mandatory
+IRM400012|13|FAIL|AD Code must be max 7 characters
+IRM400013|14|FAIL|Currency is mandatory; Currency must be alphanumeric
+IRM400014|15|FAIL|Currency must be alphanumeric
+IRM400015|16|FAIL|IE Code must be exactly 10 alphanumeric characters
+IRM400016|17|FAIL|Remitter Name is mandatory; Remitter Name contains invalid characters
+IRM400017|18|FAIL|Remitter Name contains invalid characters
+IRM400018|19|FAIL|Remitter Country is mandatory; Remitter Country must contain alphabets only
+IRM400019|20|FAIL|Remitter Country must contain alphabets only
+IRM400020|21|FAIL|Purpose of Remittance is mandatory; Purpose of Remittance contains invalid characters
+---
+TOTAL=20 PASS=10 FAIL=10

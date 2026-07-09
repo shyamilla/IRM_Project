@@ -26,8 +26,9 @@ public class DgftIrmPushScheduler {
  
     @Value("${dgft.scheduler.irm-push.enabled}")
     private boolean enabled;
- 
-    @Scheduled(cron = "${dgft.scheduler.irm-push.cron}")
+
+    // Migrated to Quartz DgftIrmPushJob. Commenting out Spring's @Scheduled to prevent duplicate execution.
+    // @Scheduled(cron = "${dgft.scheduler.irm-push.cron}")
     public void pushIrmRecords() {
  
         if (!enabled) {
